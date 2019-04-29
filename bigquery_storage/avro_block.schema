@@ -1,0 +1,46 @@
+{
+    "type": "record",
+    "name": "__root__",
+    "fields": [
+        {
+            "name": "state",
+            "type": [
+                "null",
+                "string"
+            ],
+            "doc": "2-digit state code"
+        },
+        {
+            "name": "gender",
+            "type": [
+                "null",
+                "string"
+            ],
+            "doc": "Sex (M=male or F=female)"
+        },
+        {
+            "name": "year",
+            "type": [
+                "null",
+                "long"
+            ],
+            "doc": "4-digit year of birth"
+        },
+        {
+            "name": "name",
+            "type": [
+                "null",
+                "string"
+            ],
+            "doc": "Given name of a person at birth"
+        },
+        {
+            "name": "number",
+            "type": [
+                "null",
+                "long"
+            ],
+            "doc": "Number of occurrences of the name"
+        }
+    ]
+}

@@ -29,6 +29,9 @@ except ImportError:  # pragma: NO COVER
     pandas = None
 import six
 
+import numba
+import numpy
+
 from google.cloud.bigquery_storage_v1beta1 import types
 
 
@@ -322,6 +325,7 @@ class ReadRowsPage(object):
         if self._remaining > 0:
             self._remaining -= 1
         return six.next(self._iter_rows)
+        #return six.next(self._iter_rows)
 
     # Alias needed for Python 2/3 support.
     __next__ = next
