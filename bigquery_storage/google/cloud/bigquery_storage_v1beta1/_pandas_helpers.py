@@ -18,6 +18,25 @@
 import numpy
 import numba
 import pandas
+import pyarrow
+
+
+def usa_names_to_dataframe(message, dtypes=None):
+    row_count = message.avro_rows.row_count
+    block = message.avro_rows.serialized_binary_rows
+    # state, gender, year, name, number
+    year, number = _avro_df(row_count, block)
+    year_nullmask, year_rows = year
+    number_nullmask, number_rows = number
+    year_array = pyarrow.Array.from_buffers(pyarrow.int64(), row_count, [
+        pyarrow.py_buffer(year_nullmask),
+        pyarrow.py_buffer(year_rows),
+    ])
+    number_array = pyarrow.Array.from_buffers(pyarrow.int64(), row_count, [
+        pyarrow.py_buffer(number_nullmask),
+        pyarrow.py_buffer(number_rows),
+    ])
+    return pyarrow.Table.from_arrays([year_array, number_array], names=["year", "number"]).to_pandas()
 
 
 @numba.jit(nopython=True)
@@ -51,8 +70,26 @@ def _read_long(position, block):
     return (position + 1, (n >> 1) ^ -(n & 1))
 
 
-def block_to_dataframe():
-    pass
+@numba.jit(nopython=True) #, nogil=True)
+def _make_nullmask(row_count):  #, avro_schema):
+    extra_byte = 0
+    if (row_count % 8) != 0:
+        extra_byte = 1
+    return numpy.zeros(row_count // 8 + extra_byte, dtype=numpy.uint8)
+
+
+@numba.jit(nopython=True)  #, nogil=True)
+def _rotate_nullmask(nullmask):
+    # TODO: Arrow assumes little endian. Detect big endian machines and rotate
+    # right, instead.
+    nullmask = (nullmask << 1) & 255
+
+    # Have we looped?
+    if nullmask == 0:
+        # TODO: Detect big endian machines and start at 128, instead.
+        return numba.uint8(1)
+
+    return nullmask
 
 
 @numba.jit(nopython=True)  #, nogil=True)
@@ -84,7 +121,6 @@ def _avro_df(row_count, block):  #, avro_schema):
     year = numpy.empty(row_count, dtype=numpy.int64)
     #name
     number = numpy.empty(row_count, dtype=numpy.int64)
-    arrow_buffer = numpy.empty(len(block), dtype=numpy.uint8)
     for i in range(row_count):
         nullmask = _rotate_nullmask(nullmask)
         nullbyte = i // 8

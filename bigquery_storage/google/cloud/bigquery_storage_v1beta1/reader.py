@@ -29,11 +29,13 @@ except ImportError:  # pragma: NO COVER
     pandas = None
 import six
 
-import numba
-import numpy
-
+from google.cloud.bigquery_storage_v1beta1 import _pandas_helpers
 from google.cloud.bigquery_storage_v1beta1 import types
 
+
+# Experimental: Set this global to True to use the custom Avro parser when
+# converting to pandas DataFrame.
+_USE_NUMBA_FOR_TO_DATAFRAME = False
 
 _STREAM_RESUMPTION_EXCEPTIONS = (google.api_core.exceptions.ServiceUnavailable,)
 _FASTAVRO_REQUIRED = (
@@ -325,7 +327,6 @@ class ReadRowsPage(object):
         if self._remaining > 0:
             self._remaining -= 1
         return six.next(self._iter_rows)
-        #return six.next(self._iter_rows)
 
     # Alias needed for Python 2/3 support.
     __next__ = next
@@ -370,9 +371,28 @@ class _StreamParser(object):
                 used in the stream messages.
         """
         self._read_session = read_session
+        self._avro_to_dataframe = None
         self._avro_schema_json = None
         self._fastavro_schema = None
         self._column_names = None
+
+    def _to_dataframe_with_fastavro(self, message, dtypes=None):
+        self._parse_avro_schema()
+
+        if dtypes is None:
+            dtypes = {}
+
+        columns = collections.defaultdict(list)
+        for row in self.to_rows(message):
+            for column in row:
+                columns[column].append(row[column])
+        for column in dtypes:
+            columns[column] = pandas.Series(columns[column], dtype=dtypes[column])
+        return pandas.DataFrame(columns, columns=self._column_names)
+
+    def _to_dataframe_with_numba(self, message, dtypes=None):
+        self._avro_to_dataframe = _pandas_helpers.usa_names_to_dataframe  # TODO: JIT the desired function.
+        return self._avro_to_dataframe(message, dtypes=dtypes)
 
     def to_dataframe(self, message, dtypes=None):
         """Create a :class:`pandas.DataFrame` of rows in the page.
@@ -397,18 +417,9 @@ class _StreamParser(object):
             pandas.DataFrame:
                 A data frame of all rows in the stream.
         """
-        self._parse_avro_schema()
-
-        if dtypes is None:
-            dtypes = {}
-
-        columns = collections.defaultdict(list)
-        for row in self.to_rows(message):
-            for column in row:
-                columns[column].append(row[column])
-        for column in dtypes:
-            columns[column] = pandas.Series(columns[column], dtype=dtypes[column])
-        return pandas.DataFrame(columns, columns=self._column_names)
+        if _USE_NUMBA_FOR_TO_DATAFRAME:
+            return self._to_dataframe_with_numba(message, dtypes=dtypes)
+        return self._to_dataframe_with_fastavro(message, dtypes=dtypes)
 
     def _parse_avro_schema(self):
         """Extract and parse Avro schema from a read session."""
