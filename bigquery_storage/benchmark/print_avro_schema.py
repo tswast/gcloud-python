@@ -37,13 +37,5 @@ session = client.create_read_session(
     'projects/{}'.format(project_id),
     requested_streams=1,
 )
-stream = session.streams[0]
-position = bigquery_storage_v1beta1.types.StreamPosition(
-    stream=stream,
-)
-rowstream = client.read_rows(position)
 
-rows = rowstream.rows(session)
-print(len(list(rows)))
-#import numba
-#print(numba.typeof([next(iter(rows))]))
+print(session.avro_schema.schema)

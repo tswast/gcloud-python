@@ -24,9 +24,14 @@ import google.cloud.bigquery_storage_v1beta1.reader
 client = bigquery_storage_v1beta1.BigQueryStorageClient()
 project_id = os.environ["PROJECT_ID"]
 table_ref = bigquery_storage_v1beta1.types.TableReference()
-table_ref.project_id = 'bigquery-public-data'
-table_ref.dataset_id = 'usa_names'
-table_ref.table_id = 'usa_1910_2013'
+
+table_ref.project_id = 'swast-scratch'
+table_ref.dataset_id = 'schema_examples'
+table_ref.table_id = 'easy_scalars'
+
+# table_ref.project_id = 'bigquery-public-data'
+# table_ref.dataset_id = 'usa_names'
+# table_ref.table_id = 'usa_1910_2013'
 
 session = client.create_read_session(
     table_ref,

@@ -394,7 +394,7 @@ class _StreamParser(object):
 
     def to_arrow(self, message):
         """[Alpha] TODOTODOTODO"""
-        self._avro_to_arrow_func = _avro_to_arrow.usa_names_to_arrow # TODO: JIT the desired function.
+        self._avro_to_arrow_func = _avro_to_arrow.easy_scalars_to_arrow # TODO: JIT the desired function.
         return self._avro_to_arrow_func(message)
 
     def to_dataframe(self, message, dtypes=None):

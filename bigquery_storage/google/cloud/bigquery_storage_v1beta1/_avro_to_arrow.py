@@ -22,14 +22,40 @@ import pyarrow
 
 # Scalar types to support.
 # INT64
-# NUMERIC (decimal)
 # FLOAT64
 # BOOL
+#
+# Later:
+# NUMERIC (decimal) ??? how is this actually serialized. Let's wait.
 # DATE
-# DATETIME - need to parse from string
 # TIME
 # TIMESTAMP
+#
+# Even later:
+# DATETIME - need to parse from string
 
+
+def easy_scalars_to_arrow(message):
+    row_count = message.avro_rows.row_count
+    block = message.avro_rows.serialized_binary_rows
+    int_col, float_col, bool_col = _avro_df(row_count, block)
+    int_nullmask, int_rows = int_col
+    float_nullmask, float_rows = float_col
+    bool_nullmask, bool_rows = bool_col
+
+    int_array = pyarrow.Array.from_buffers(pyarrow.int64(), row_count, [
+        pyarrow.py_buffer(int_nullmask),
+        pyarrow.py_buffer(int_rows),
+    ])
+    float_array = pyarrow.Array.from_buffers(pyarrow.float64(), row_count, [
+        pyarrow.py_buffer(float_nullmask),
+        pyarrow.py_buffer(float_rows),
+    ])
+    bool_array = pyarrow.Array.from_buffers(pyarrow.bool_(), row_count, [
+        pyarrow.py_buffer(bool_nullmask),
+        pyarrow.py_buffer(bool_rows),
+    ])
+    return pyarrow.Table.from_arrays([int_array, float_array, bool_array], names=["int_col", "float_col", "bool_col"])
 
 
 def usa_names_to_arrow(message):
@@ -69,6 +95,21 @@ def _copy_bytes(input_bytes, input_start, output_bytes, output_start, strlen):
 
 
 @numba.jit(nopython=True, nogil=True)
+def _read_boolean(position, block):
+    """Read a single byte whose value is either 0 (false) or 1 (true).
+
+    Returns:
+        Tuple[int, numba.uint8]:
+            (new position, boolean)
+
+    """
+    # We store bool as a bit array. Return 0xff so that we can bitwise AND with
+    # the mask that says which bit to write to.
+    value = numba.uint8(0xff if block[position] != 0 else 0)
+    return (position + 1, value)
+
+
+@numba.jit(nopython=True, nogil=True)
 def _read_bytes(position, block):
     position, strlen = _read_long(position, block)
     value = numpy.empty(strlen, dtype=numpy.uint8)
@@ -78,13 +119,33 @@ def _read_bytes(position, block):
 
 
 @numba.jit(nopython=True, nogil=True)
+def _read_double(position, block):
+    """A double is written as 8 bytes.
+
+    Returns:
+        Tuple[numba.int, numba.float64]:
+            (new position, double precision floating point)
+    """
+    # Temporarily use an integer data type for bit shifting purposes. Encoded
+    # as little-endian IEEE 754 floating point.
+    value = (numba.uint64(block[position])
+            | (numba.uint64(block[position + 1]) << 8)
+            | (numba.uint64(block[position + 2]) << 16)
+            | (numba.uint64(block[position + 3]) << 24)
+            | (numba.uint64(block[position + 4]) << 32)
+            | (numba.uint64(block[position + 5]) << 40)
+            | (numba.uint64(block[position + 6]) << 48)
+            | (numba.uint64(block[position + 7]) << 56))
+    return (position + 8, numba.float64(value))
+
+
+@numba.jit(nopython=True, nogil=True)
 def _read_long(position, block):
-    """int and long values are written using variable-length, zig-zag
-    coding.
+    """Read an int64 using variable-length, zig-zag coding.
 
-    Returns (new position, long integer)
-
-    Derived from fastavro's implementation.
+    Returns:
+        Tuple[int, int]:
+            (new position, long integer)
     """
     b = block[position]
     n = b & 0x7F
@@ -142,143 +203,61 @@ def _avro_df(row_count, block):  #, avro_schema):
     position = 0
     nullmask = numba.uint8(0)
 
-    state_nullmask = _make_nullmask(row_count)
-    gender_nullmask = _make_nullmask(row_count)
-    year_nullmask = _make_nullmask(row_count)
-    name_nullmask = _make_nullmask(row_count)
-    number_nullmask = _make_nullmask(row_count)
+    int_nullmask = _make_nullmask(row_count)
+    float_nullmask = _make_nullmask(row_count)
+    bool_nullmask = _make_nullmask(row_count)
 
-    state_input_offsets = numpy.empty(row_count, dtype=numpy.int64)
-    gender_input_offsets = numpy.empty(row_count, dtype=numpy.int64)
-    name_input_offsets = numpy.empty(row_count, dtype=numpy.int64)
-
-    state_offsets = numpy.empty(row_count + 1, dtype=numpy.int64)
-    gender_offsets = numpy.empty(row_count + 1, dtype=numpy.int64)
-    year = numpy.empty(row_count, dtype=numpy.int64)
-    name_offsets = numpy.empty(row_count + 1, dtype=numpy.int64)
-    number = numpy.empty(row_count, dtype=numpy.int64)
-
-    state_offsets[0] = 0
-    gender_offsets[0] = 0
-    name_offsets[0] = 0
+    int_col = numpy.empty(row_count, dtype=numpy.int64)
+    float_col = numpy.empty(row_count, dtype=numpy.float64)
+    bool_col = _make_nullmask(row_count)
 
     for i in range(row_count):
         nullmask = _rotate_nullmask(nullmask)
         nullbyte = i // 8
 
         # {
-        #     "name": "state",
-        #     "type": [
-        #         "null",
-        #         "string"
-        #     ],
-        #     "doc": "2-digit state code"
-        # }
-        position, union_type = _read_long(position, block)
-        if union_type == 0:
-            state = None
-            state_offsets[i + 1] = state_offsets[i]
-        else:
-            #position, state = _read_bytes(position, block)
-            position, strlen = _read_long(position, block)
-
-            # Save where we are to copy later.
-            state_input_offsets[i] = position
-            state_offsets[i + 1] = state_offsets[i] + strlen
-            position = position + strlen
-
-            #state = str(block[position:position + strlen], encoding="utf-8")
-            #state = block[position:position + strlen].decode("utf-8")
-            #block[i] = block[position] #:position + strlen]
-            #state = b"" + block[position:position + strlen]
-            #state = "WA"
-            #position = position + strlen
-        # {
-        #     "name": "gender",
-        #     "type": [
-        #         "null",
-        #         "string"
-        #     ],
-        #     "doc": "Sex (M=male or F=female)"
-        # }
-        position, union_type = _read_long(position, block)
-        if union_type == 0:
-            gender = None
-            gender_offsets[i + 1] = gender_offsets[i]
-        else:
-            position, strlen = _read_long(position, block)
-
-            # Save where we are to copy later.
-            gender_input_offsets[i] = position
-            gender_offsets[i + 1] = gender_offsets[i] + strlen
-            position = position + strlen
-
-        #gender = block[position:position + strlen]
-        # {
-        #     "name": "year",
+        #     "name": "int_col",
         #     "type": [
         #         "null",
         #         "long"
-        #     ],
-        #     "doc": "4-digit year of birth"
-        # }
+        #     ]
+        # },
         position, union_type = _read_long(position, block)
-        if union_type != 0:
-            year_nullmask[nullbyte] = year_nullmask[nullbyte] | nullmask
-            position, year[i] = _read_long(position, block)
+        if union_type == 0:
+            int_nullmask[nullbyte] = int_nullmask[nullbyte] | nullmask
+        else:
+            position, int_col[i] = _read_long(position, block)
+
         # {
-        #     "name": "name",
+        #     "name": "float_col",
         #     "type": [
         #         "null",
-        #         "string"
-        #     ],
-        #     "doc": "Given name of a person at birth"
+        #         "double"
+        #     ]
+        # },
+        position, union_type = _read_long(position, block)
+        if union_type == 0:
+            float_nullmask[nullbyte] = float_nullmask[nullbyte] | nullmask
+        else:
+            position, float_col[i] = _read_double(position, block)
+
+        # {
+        #     "name": "bool_col",
+        #     "type": [
+        #         "null",
+        #         "boolean"
+        #     ]
         # }
         position, union_type = _read_long(position, block)
         if union_type == 0:
-            name = None
-            name_offsets[i + 1] = name_offsets[i]
+            bool_nullmask[nullbyte] = bool_nullmask[nullbyte] | nullmask
         else:
-            position, strlen = _read_long(position, block)
+            position, boolmask = _read_boolean(position, block)
+            bool_col[nullbyte] = bool_col[nullbyte] | (boolmask & nullmask)
 
-            # Save where we are to copy later.
-            name_input_offsets[i] = position
-            name_offsets[i + 1] = name_offsets[i] + strlen
-            position = position + strlen
-
-        #name = block[position:position + strlen]
-        # {
-        #     "name": "number",
-        #     "type": [
-        #         "null",
-        #         "long"
-        #     ],
-        #     "doc": "Number
-        # }
-        position, union_type = _read_long(position, block)
-        if union_type != 0:
-            number_nullmask[nullbyte] = number_nullmask[nullbyte] | nullmask
-            position, number[i] = _read_long(position, block)
-
-    # Second pass: copy all the strings.
-    state = numpy.empty(state_offsets[row_count - 1], dtype=numpy.uint8)
-    gender = numpy.empty(gender_offsets[row_count - 1], dtype=numpy.uint8)
-    name = numpy.empty(name_offsets[row_count - 1], dtype=numpy.uint8)
-
-    for i in numba.prange(row_count):
-        input_start = state_input_offsets[i]
-        output_start = state_offsets[i]
-        strlen = state_offsets[i + 1] - state_offsets[i]
-        _copy_bytes(block, input_start, state, output_start, strlen)
-        #_copy_bytes(block, gender_input_offets[i], gender, gender_offsets[i], gender_offsets[i + 1] - gender_offsets[i])
-        #_copy_bytes(block, name_input_offets[i], name, name_offsets[i], name_offsets[i + 1] - name_offsets[i])
-
-        # rows.append((state, gender, year, name, number))
     return (
-        (state_nullmask, state_offsets, state),
-        (gender_nullmask, gender_offsets, None),
-        (year_nullmask, year),
-        (name_nullmask, name_offsets, None),
-        (number_nullmask, number),
+        (int_nullmask, int_col),
+        (float_nullmask, float_col),
+        (bool_nullmask, bool_col),
     )
 
