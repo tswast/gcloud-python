@@ -24,8 +24,7 @@ import pyarrow
 def usa_names_to_dataframe(message, dtypes=None):
     row_count = message.avro_rows.row_count
     block = message.avro_rows.serialized_binary_rows
-    # state, gender, year, name, number
-    year, number = _avro_df(row_count, block)
+    state, gender, year, name, number = _avro_df(row_count, block)
     year_nullmask, year_rows = year
     number_nullmask, number_rows = number
     year_array = pyarrow.Array.from_buffers(pyarrow.int64(), row_count, [
@@ -92,7 +91,7 @@ def _rotate_nullmask(nullmask):
     return nullmask
 
 
-@numba.jit(nopython=True)  #, nogil=True)
+@numba.jit(nopython=True, nogil=True)
 def _avro_df(row_count, block):  #, avro_schema):
     """Parse all rows in a stream block.
 
@@ -111,17 +110,29 @@ def _avro_df(row_count, block):  #, avro_schema):
     """
     position = 0
     nullmask = numba.uint8(0)
-    #state_nullmask
-    #gender_nullmask
+
+    state_nullmask = _make_nullmask(row_count)
+    gender_nullmask = _make_nullmask(row_count)
     year_nullmask = _make_nullmask(row_count)
-    #name_nullmask
+    name_nullmask = _make_nullmask(row_count)
     number_nullmask = _make_nullmask(row_count)
-    #state
-    #gender
+
+    state_input_offsets = numpy.empty(row_count * 2, dtype=numpy.int64)
+    gender_input_offsets = numpy.empty(row_count * 2, dtype=numpy.int64)
+    name_input_offsets = numpy.empty(row_count * 2, dtype=numpy.int64)
+
+    state_offsets = numpy.empty(row_count + 1, dtype=numpy.int64)
+    gender_offsets = numpy.empty(row_count + 1, dtype=numpy.int64)
     year = numpy.empty(row_count, dtype=numpy.int64)
-    #name
+    name_offsets = numpy.empty(row_count + 1, dtype=numpy.int64)
     number = numpy.empty(row_count, dtype=numpy.int64)
+
+    state_offsets[0] = 0
+    gender_offsets[0] = 0
+    name_offsets[0] = 0
+
     for i in range(row_count):
+        input_offset = i * 2
         nullmask = _rotate_nullmask(nullmask)
         nullbyte = i // 8
 
@@ -136,9 +147,18 @@ def _avro_df(row_count, block):  #, avro_schema):
         position, union_type = _read_long(position, block)
         if union_type == 0:
             state = None
+            state_offsets[i + 1] = state_offsets[i]
         else:
-            position, state = _read_bytes(position, block)
-            #position, strlen = _read_long(position, block)
+            #position, state = _read_bytes(position, block)
+            position, strlen = _read_long(position, block)
+
+            # Save where we are to copy later.
+            state_input_offsets[input_offset] = position
+            position = position + strlen
+            state_input_offsets[input_offset + 1] = position
+
+            state_offsets[i + 1] = state_offsets[i] + strlen
+
             #state = str(block[position:position + strlen], encoding="utf-8")
             #state = block[position:position + strlen].decode("utf-8")
             #block[i] = block[position] #:position + strlen]
@@ -156,8 +176,16 @@ def _avro_df(row_count, block):  #, avro_schema):
         position, union_type = _read_long(position, block)
         if union_type == 0:
             gender = None
+            gender_offsets[i + 1] = gender_offsets[i]
         else:
-            position, gender = _read_bytes(position, block)
+            position, strlen = _read_long(position, block)
+
+            # Save where we are to copy later.
+            gender_input_offsets[input_offset] = position
+            position = position + strlen
+            gender_input_offsets[input_offset + 1] = position
+
+            gender_offsets[i + 1] = gender_offsets[i] + strlen
         #gender = block[position:position + strlen]
         # {
         #     "name": "year",
@@ -182,8 +210,16 @@ def _avro_df(row_count, block):  #, avro_schema):
         position, union_type = _read_long(position, block)
         if union_type == 0:
             name = None
+            name_offsets[i + 1] = name_offsets[i]
         else:
-            position, name = _read_bytes(position, block)
+            position, strlen = _read_long(position, block)
+
+            # Save where we are to copy later.
+            name_input_offsets[input_offset] = position
+            position = position + strlen
+            name_input_offsets[input_offset + 1] = position
+
+            name_offsets[i + 1] = name_offsets[i] + strlen
 
         #name = block[position:position + strlen]
         # {
@@ -200,5 +236,11 @@ def _avro_df(row_count, block):  #, avro_schema):
             position, number[i] = _read_long(position, block)
 
         # rows.append((state, gender, year, name, number))
-    return ((year_nullmask, year), (number_nullmask, number))
+    return (
+        (state_nullmask, state_offsets, None),
+        (gender_nullmask, gender_offsets, None),
+        (year_nullmask, year),
+        (name_nullmask, name_offsets, None),
+        (number_nullmask, number),
+    )
 
