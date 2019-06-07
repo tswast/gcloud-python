@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Helpers to parse blocks into pandas DataFrames."""
+"""Helpers to parse ReadRowsResponse messages into Arrow Tables."""
 
 # TODO: optional imports
 import numpy
@@ -20,13 +20,31 @@ import numba
 import pandas
 import pyarrow
 
+# Scalar types to support.
+# INT64
+# NUMERIC (decimal)
+# FLOAT64
+# BOOL
+# DATE
+# DATETIME - need to parse from string
+# TIME
+# TIMESTAMP
 
-def usa_names_to_dataframe(message, dtypes=None):
+
+
+def usa_names_to_arrow(message):
     row_count = message.avro_rows.row_count
     block = message.avro_rows.serialized_binary_rows
     state, gender, year, name, number = _avro_df(row_count, block)
+    state_nullmask, state_offsets, state_bytes = state
     year_nullmask, year_rows = year
     number_nullmask, number_rows = number
+    # Strings aren't supported. :-( https://issues.apache.org/jira/browse/ARROW-2607
+    #my_string_array = pyarrow.Array.from_buffers(pyarrow.string(), row_count, [
+    #    pyarrow.py_buffer(my_string_nullmask),
+    #    pyarrow.py_buffer(my_string_offsets),
+    #    pyarrow.py_buffer(my_string_bytes),
+    #])
     year_array = pyarrow.Array.from_buffers(pyarrow.int64(), row_count, [
         pyarrow.py_buffer(year_nullmask),
         pyarrow.py_buffer(year_rows),
@@ -35,10 +53,22 @@ def usa_names_to_dataframe(message, dtypes=None):
         pyarrow.py_buffer(number_nullmask),
         pyarrow.py_buffer(number_rows),
     ])
-    return pyarrow.Table.from_arrays([year_array, number_array], names=["year", "number"]).to_pandas()
+    return pyarrow.Table.from_arrays([year_array, number_array], names=["year", "number"])
 
 
-@numba.jit(nopython=True)
+@numba.jit(nopython=True, nogil=True)
+def _copy_bytes(input_bytes, input_start, output_bytes, output_start, strlen):
+    input_pos = input_start
+    output_pos = output_start
+    input_end = input_start + strlen
+    output_end = input_start + strlen
+    while input_pos < input_end:
+        output_bytes[output_pos] = input_bytes[input_pos]
+        input_pos += 1
+        output_pos += 1
+
+
+@numba.jit(nopython=True, nogil=True)
 def _read_bytes(position, block):
     position, strlen = _read_long(position, block)
     value = numpy.empty(strlen, dtype=numpy.uint8)
@@ -47,7 +77,7 @@ def _read_bytes(position, block):
     return (position + strlen, value)
 
 
-@numba.jit(nopython=True)
+@numba.jit(nopython=True, nogil=True)
 def _read_long(position, block):
     """int and long values are written using variable-length, zig-zag
     coding.
@@ -69,7 +99,7 @@ def _read_long(position, block):
     return (position + 1, (n >> 1) ^ -(n & 1))
 
 
-@numba.jit(nopython=True) #, nogil=True)
+@numba.jit(nopython=True, nogil=True)
 def _make_nullmask(row_count):  #, avro_schema):
     extra_byte = 0
     if (row_count % 8) != 0:
@@ -91,6 +121,7 @@ def _rotate_nullmask(nullmask):
     return nullmask
 
 
+#@numba.jit(nopython=True)
 @numba.jit(nopython=True, nogil=True)
 def _avro_df(row_count, block):  #, avro_schema):
     """Parse all rows in a stream block.
@@ -117,9 +148,9 @@ def _avro_df(row_count, block):  #, avro_schema):
     name_nullmask = _make_nullmask(row_count)
     number_nullmask = _make_nullmask(row_count)
 
-    state_input_offsets = numpy.empty(row_count * 2, dtype=numpy.int64)
-    gender_input_offsets = numpy.empty(row_count * 2, dtype=numpy.int64)
-    name_input_offsets = numpy.empty(row_count * 2, dtype=numpy.int64)
+    state_input_offsets = numpy.empty(row_count, dtype=numpy.int64)
+    gender_input_offsets = numpy.empty(row_count, dtype=numpy.int64)
+    name_input_offsets = numpy.empty(row_count, dtype=numpy.int64)
 
     state_offsets = numpy.empty(row_count + 1, dtype=numpy.int64)
     gender_offsets = numpy.empty(row_count + 1, dtype=numpy.int64)
@@ -132,7 +163,6 @@ def _avro_df(row_count, block):  #, avro_schema):
     name_offsets[0] = 0
 
     for i in range(row_count):
-        input_offset = i * 2
         nullmask = _rotate_nullmask(nullmask)
         nullbyte = i // 8
 
@@ -153,11 +183,9 @@ def _avro_df(row_count, block):  #, avro_schema):
             position, strlen = _read_long(position, block)
 
             # Save where we are to copy later.
-            state_input_offsets[input_offset] = position
-            position = position + strlen
-            state_input_offsets[input_offset + 1] = position
-
+            state_input_offsets[i] = position
             state_offsets[i + 1] = state_offsets[i] + strlen
+            position = position + strlen
 
             #state = str(block[position:position + strlen], encoding="utf-8")
             #state = block[position:position + strlen].decode("utf-8")
@@ -181,11 +209,10 @@ def _avro_df(row_count, block):  #, avro_schema):
             position, strlen = _read_long(position, block)
 
             # Save where we are to copy later.
-            gender_input_offsets[input_offset] = position
-            position = position + strlen
-            gender_input_offsets[input_offset + 1] = position
-
+            gender_input_offsets[i] = position
             gender_offsets[i + 1] = gender_offsets[i] + strlen
+            position = position + strlen
+
         #gender = block[position:position + strlen]
         # {
         #     "name": "year",
@@ -215,11 +242,9 @@ def _avro_df(row_count, block):  #, avro_schema):
             position, strlen = _read_long(position, block)
 
             # Save where we are to copy later.
-            name_input_offsets[input_offset] = position
-            position = position + strlen
-            name_input_offsets[input_offset + 1] = position
-
+            name_input_offsets[i] = position
             name_offsets[i + 1] = name_offsets[i] + strlen
+            position = position + strlen
 
         #name = block[position:position + strlen]
         # {
@@ -235,9 +260,22 @@ def _avro_df(row_count, block):  #, avro_schema):
             number_nullmask[nullbyte] = number_nullmask[nullbyte] | nullmask
             position, number[i] = _read_long(position, block)
 
+    # Second pass: copy all the strings.
+    state = numpy.empty(state_offsets[row_count - 1], dtype=numpy.uint8)
+    gender = numpy.empty(gender_offsets[row_count - 1], dtype=numpy.uint8)
+    name = numpy.empty(name_offsets[row_count - 1], dtype=numpy.uint8)
+
+    for i in numba.prange(row_count):
+        input_start = state_input_offsets[i]
+        output_start = state_offsets[i]
+        strlen = state_offsets[i + 1] - state_offsets[i]
+        _copy_bytes(block, input_start, state, output_start, strlen)
+        #_copy_bytes(block, gender_input_offets[i], gender, gender_offsets[i], gender_offsets[i + 1] - gender_offsets[i])
+        #_copy_bytes(block, name_input_offets[i], name, name_offsets[i], name_offsets[i + 1] - name_offsets[i])
+
         # rows.append((state, gender, year, name, number))
     return (
-        (state_nullmask, state_offsets, None),
+        (state_nullmask, state_offsets, state),
         (gender_nullmask, gender_offsets, None),
         (year_nullmask, year),
         (name_nullmask, name_offsets, None),

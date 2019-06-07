@@ -21,8 +21,6 @@ from google.cloud import bigquery_storage_v1beta1
 import google.cloud.bigquery_storage_v1beta1.reader
 
 
-google.cloud.bigquery_storage_v1beta1.reader._USE_NUMBA_FOR_TO_DATAFRAME = True
-
 client = bigquery_storage_v1beta1.BigQueryStorageClient()
 project_id = os.environ["PROJECT_ID"]
 table_ref = bigquery_storage_v1beta1.types.TableReference()
@@ -42,5 +40,9 @@ position = bigquery_storage_v1beta1.types.StreamPosition(
 rowstream = client.read_rows(position)
 
 rows = rowstream.rows(session)
-df = rows.to_dataframe()
-print(df)
+tbl = rows.to_arrow()
+print(tbl)
+#print(tbl.num_rows)
+# df = tbl.to_pandas()
+# print(len(df.index))
+

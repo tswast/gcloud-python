@@ -1,3 +1,4 @@
+
 # Copyright 2018 Google LLC
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -26,6 +27,8 @@ table_ref = bigquery_storage_v1beta1.types.TableReference()
 table_ref.project_id = 'bigquery-public-data'
 table_ref.dataset_id = 'usa_names'
 table_ref.table_id = 'usa_1910_2013'
+# table_ref.dataset_id = 'new_york_citibike'
+# table_ref.table_id = 'citibike_trips'
 
 session = client.create_read_session(
     table_ref,
@@ -38,8 +41,8 @@ position = bigquery_storage_v1beta1.types.StreamPosition(
 )
 rowstream = client.read_rows(position)
 
-rows = rowstream.rows(session)
-df = rows.to_dataframe()
-print(len(df.index))
-#import numba
-#print(numba.typeof([next(iter(rows))]))
+num_rows = 0
+for page in rowstream.rows(session).pages:
+    num_rows += page.num_items
+
+print(num_rows)

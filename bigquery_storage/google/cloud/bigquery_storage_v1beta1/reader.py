@@ -29,13 +29,9 @@ except ImportError:  # pragma: NO COVER
     pandas = None
 import six
 
-from google.cloud.bigquery_storage_v1beta1 import _pandas_helpers
+from google.cloud.bigquery_storage_v1beta1 import _avro_to_arrow
 from google.cloud.bigquery_storage_v1beta1 import types
 
-
-# Experimental: Set this global to True to use the custom Avro parser when
-# converting to pandas DataFrame.
-_USE_NUMBA_FOR_TO_DATAFRAME = False
 
 _STREAM_RESUMPTION_EXCEPTIONS = (google.api_core.exceptions.ServiceUnavailable,)
 _FASTAVRO_REQUIRED = (
@@ -247,6 +243,19 @@ class ReadRowsIterable(object):
             for row in page:
                 yield row
 
+    def to_arrow(self):
+        """[Alpha] TODOTODOTODO"""
+        import pyarrow
+        #if pyarrow is not None:
+        #    raise ValueError("pyarrow is required")
+
+        tables = (page.to_arrow() for page in self.pages)
+        return pyarrow.concat_tables(tables)
+        # num_rows = 0
+        # for table in tables:
+        #     num_rows += table.num_rows
+        # return num_rows
+
     def to_dataframe(self, dtypes=None):
         """Create a :class:`pandas.DataFrame` of all rows in the stream.
 
@@ -331,6 +340,13 @@ class ReadRowsPage(object):
     # Alias needed for Python 2/3 support.
     __next__ = next
 
+    def to_arrow(self):
+        """[Alpha] TODO"""
+        #if pyarrow is None:
+        #    raise ImportError("pyarrow is required")
+        return self._stream_parser.to_arrow(self._message)
+
+
     def to_dataframe(self, dtypes=None):
         """Create a :class:`pandas.DataFrame` of rows in the page.
 
@@ -376,23 +392,10 @@ class _StreamParser(object):
         self._fastavro_schema = None
         self._column_names = None
 
-    def _to_dataframe_with_fastavro(self, message, dtypes=None):
-        self._parse_avro_schema()
-
-        if dtypes is None:
-            dtypes = {}
-
-        columns = collections.defaultdict(list)
-        for row in self.to_rows(message):
-            for column in row:
-                columns[column].append(row[column])
-        for column in dtypes:
-            columns[column] = pandas.Series(columns[column], dtype=dtypes[column])
-        return pandas.DataFrame(columns, columns=self._column_names)
-
-    def _to_dataframe_with_numba(self, message, dtypes=None):
-        self._avro_to_dataframe = _pandas_helpers.usa_names_to_dataframe  # TODO: JIT the desired function.
-        return self._avro_to_dataframe(message, dtypes=dtypes)
+    def to_arrow(self, message):
+        """[Alpha] TODOTODOTODO"""
+        self._avro_to_arrow_func = _avro_to_arrow.usa_names_to_arrow # TODO: JIT the desired function.
+        return self._avro_to_arrow_func(message)
 
     def to_dataframe(self, message, dtypes=None):
         """Create a :class:`pandas.DataFrame` of rows in the page.
@@ -417,9 +420,18 @@ class _StreamParser(object):
             pandas.DataFrame:
                 A data frame of all rows in the stream.
         """
-        if _USE_NUMBA_FOR_TO_DATAFRAME:
-            return self._to_dataframe_with_numba(message, dtypes=dtypes)
-        return self._to_dataframe_with_fastavro(message, dtypes=dtypes)
+        self._parse_avro_schema()
+
+        if dtypes is None:
+            dtypes = {}
+
+        columns = collections.defaultdict(list)
+        for row in self.to_rows(message):
+            for column in row:
+                columns[column].append(row[column])
+        for column in dtypes:
+            columns[column] = pandas.Series(columns[column], dtype=dtypes[column])
+        return pandas.DataFrame(columns, columns=self._column_names)
 
     def _parse_avro_schema(self):
         """Extract and parse Avro schema from a read session."""
