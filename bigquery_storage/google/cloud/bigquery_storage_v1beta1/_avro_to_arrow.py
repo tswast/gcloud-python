@@ -128,15 +128,16 @@ def _read_double(position, block):
     """
     # Temporarily use an integer data type for bit shifting purposes. Encoded
     # as little-endian IEEE 754 floating point.
-    value = (numba.uint64(block[position])
-            | (numba.uint64(block[position + 1]) << 8)
-            | (numba.uint64(block[position + 2]) << 16)
-            | (numba.uint64(block[position + 3]) << 24)
-            | (numba.uint64(block[position + 4]) << 32)
-            | (numba.uint64(block[position + 5]) << 40)
-            | (numba.uint64(block[position + 6]) << 48)
-            | (numba.uint64(block[position + 7]) << 56))
-    return (position + 8, numba.float64(value))
+    value = numpy.uint64(block[position])
+    value = (value
+            | (numpy.uint64(block[position + 1]) << 8)
+            | (numpy.uint64(block[position + 2]) << 16)
+            | (numpy.uint64(block[position + 3]) << 24)
+            | (numpy.uint64(block[position + 4]) << 32)
+            | (numpy.uint64(block[position + 5]) << 40)
+            | (numpy.uint64(block[position + 6]) << 48)
+            | (numpy.uint64(block[position + 7]) << 56))
+    return (position + 8, numpy.uint64(value).view(numpy.float64))
 
 
 @numba.jit(nopython=True, nogil=True)
@@ -223,9 +224,8 @@ def _avro_df(row_count, block):  #, avro_schema):
         #     ]
         # },
         position, union_type = _read_long(position, block)
-        if union_type == 0:
+        if union_type != 0:
             int_nullmask[nullbyte] = int_nullmask[nullbyte] | nullmask
-        else:
             position, int_col[i] = _read_long(position, block)
 
         # {
@@ -236,9 +236,8 @@ def _avro_df(row_count, block):  #, avro_schema):
         #     ]
         # },
         position, union_type = _read_long(position, block)
-        if union_type == 0:
+        if union_type != 0:
             float_nullmask[nullbyte] = float_nullmask[nullbyte] | nullmask
-        else:
             position, float_col[i] = _read_double(position, block)
 
         # {
@@ -249,9 +248,8 @@ def _avro_df(row_count, block):  #, avro_schema):
         #     ]
         # }
         position, union_type = _read_long(position, block)
-        if union_type == 0:
+        if union_type != 0:
             bool_nullmask[nullbyte] = bool_nullmask[nullbyte] | nullmask
-        else:
             position, boolmask = _read_boolean(position, block)
             bool_col[nullbyte] = bool_col[nullbyte] | (boolmask & nullmask)
 
