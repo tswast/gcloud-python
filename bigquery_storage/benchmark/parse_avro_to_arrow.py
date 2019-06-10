@@ -46,8 +46,8 @@ rowstream = client.read_rows(position)
 
 rows = rowstream.rows(session)
 tbl = rows.to_arrow()
-print(tbl)
+#print(tbl)
 #print(tbl.num_rows)
-# df = tbl.to_pandas()
-# print(len(df.index))
+df = tbl.to_pandas()
+print(len(df.index))
 

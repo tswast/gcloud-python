@@ -16,6 +16,7 @@
 from __future__ import absolute_import
 
 import concurrent.futures
+import struct
 import os
 
 from google.cloud import bigquery_storage_v1beta1
@@ -24,9 +25,14 @@ from google.cloud import bigquery_storage_v1beta1
 client = bigquery_storage_v1beta1.BigQueryStorageClient()
 project_id = os.environ["PROJECT_ID"]
 table_ref = bigquery_storage_v1beta1.types.TableReference()
-table_ref.project_id = 'bigquery-public-data'
-table_ref.dataset_id = 'usa_names'
-table_ref.table_id = 'usa_1910_2013'
+
+table_ref.project_id = 'swast-scratch'
+table_ref.dataset_id = 'schema_examples'
+table_ref.table_id = 'easy_scalars'
+
+# table_ref.project_id = 'bigquery-public-data'
+# table_ref.dataset_id = 'usa_names'
+# table_ref.table_id = 'usa_1910_2013'
 # table_ref.dataset_id = 'new_york_citibike'
 # table_ref.table_id = 'citibike_trips'
 
@@ -41,8 +47,9 @@ position = bigquery_storage_v1beta1.types.StreamPosition(
 )
 rowstream = client.read_rows(position)
 
-num_rows = 0
-for page in rowstream.rows(session).pages:
-    num_rows += page.num_items
-
-print(num_rows)
+with open("benchmark/messages/{}.records".format(table_ref.table_id), "wb") as downloads:
+    for message in rowstream:
+        message_bytes = message.SerializeToString()
+        message_len = struct.pack("i", len(message_bytes))
+        downloads.write(message_len)
+        downloads.write(message_bytes)

@@ -387,14 +387,16 @@ class _StreamParser(object):
                 used in the stream messages.
         """
         self._read_session = read_session
-        self._avro_to_dataframe = None
+        self._avro_to_arrow_func = None
         self._avro_schema_json = None
         self._fastavro_schema = None
         self._column_names = None
 
     def to_arrow(self, message):
         """[Alpha] TODOTODOTODO"""
-        self._avro_to_arrow_func = _avro_to_arrow.easy_scalars_to_arrow # TODO: JIT the desired function.
+        self._parse_avro_schema()
+        if self._avro_to_arrow_func is None:
+            self._avro_to_arrow_func = _avro_to_arrow.generate_avro_to_arrow_parser(self._avro_schema_json)
         return self._avro_to_arrow_func(message)
 
     def to_dataframe(self, message, dtypes=None):

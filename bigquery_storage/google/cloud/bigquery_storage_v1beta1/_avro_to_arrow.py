@@ -35,6 +35,43 @@ import pyarrow
 # DATETIME - need to parse from string
 
 
+def generate_avro_to_arrow_parser(avro_schema):
+    """Return a parser that takes a ReadRowsResponse message and returns a
+    :class:`pyarrow.Table` object.
+
+    Args:
+        avro_schema (Map):
+            Avro schema in JSON format.
+
+    Returns:
+        A function that takes a message and returns a table.
+    """
+    message_to_buffers = numba.jit(nopython=True, nogil=True)(_avro_df)
+    def message_to_table(message):
+        row_count = message.avro_rows.row_count
+        block = message.avro_rows.serialized_binary_rows
+        int_col, float_col, bool_col = message_to_buffers(row_count, block)
+        int_nullmask, int_rows = int_col
+        float_nullmask, float_rows = float_col
+        bool_nullmask, bool_rows = bool_col
+
+        int_array = pyarrow.Array.from_buffers(pyarrow.int64(), row_count, [
+            pyarrow.py_buffer(int_nullmask),
+            pyarrow.py_buffer(int_rows),
+        ])
+        float_array = pyarrow.Array.from_buffers(pyarrow.float64(), row_count, [
+            pyarrow.py_buffer(float_nullmask),
+            pyarrow.py_buffer(float_rows),
+        ])
+        bool_array = pyarrow.Array.from_buffers(pyarrow.bool_(), row_count, [
+            pyarrow.py_buffer(bool_nullmask),
+            pyarrow.py_buffer(bool_rows),
+        ])
+        return pyarrow.Table.from_arrays([int_array, float_array, bool_array], names=["int_col", "float_col", "bool_col"])
+    return message_to_table
+
+
+
 def easy_scalars_to_arrow(message):
     row_count = message.avro_rows.row_count
     block = message.avro_rows.serialized_binary_rows
@@ -184,7 +221,7 @@ def _rotate_nullmask(nullmask):
 
 
 #@numba.jit(nopython=True)
-@numba.jit(nopython=True, nogil=True)
+#@numba.jit(nopython=True, nogil=True)
 def _avro_df(row_count, block):  #, avro_schema):
     """Parse all rows in a stream block.
 
