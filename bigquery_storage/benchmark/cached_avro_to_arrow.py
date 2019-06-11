@@ -40,8 +40,10 @@ with open("benchmark/messages/{}.records".format(table_id), "rb") as downloads:
     while True:
         message_len_bytes = downloads.read(4)
         if not message_len_bytes:
-            sys.exit()
+            break
         message_len = struct.unpack("i", message_len_bytes)[0]
         message = bigquery_storage_v1beta1.types.ReadRowsResponse()
         message.ParseFromString(downloads.read(message_len))
         tables.append(parser(message))
+
+print(tables[0].to_pandas())

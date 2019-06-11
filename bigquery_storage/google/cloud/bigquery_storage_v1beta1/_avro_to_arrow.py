@@ -14,6 +14,8 @@
 
 """Helpers to parse ReadRowsResponse messages into Arrow Tables."""
 
+import copy
+
 # TODO: optional imports
 import numpy
 import numba
@@ -46,30 +48,131 @@ def generate_avro_to_arrow_parser(avro_schema):
     Returns:
         A function that takes a message and returns a table.
     """
-    message_to_buffers = numba.jit(nopython=True, nogil=True)(_avro_df)
-    def message_to_table(message):
-        row_count = message.avro_rows.row_count
-        block = message.avro_rows.serialized_binary_rows
-        int_col, float_col, bool_col = message_to_buffers(row_count, block)
-        int_nullmask, int_rows = int_col
-        float_nullmask, float_rows = float_col
-        bool_nullmask, bool_rows = bool_col
+    gen_globals = copy.copy(globals())
+    gen_locals = copy.copy(locals())
 
-        int_array = pyarrow.Array.from_buffers(pyarrow.int64(), row_count, [
-            pyarrow.py_buffer(int_nullmask),
-            pyarrow.py_buffer(int_rows),
-        ])
-        float_array = pyarrow.Array.from_buffers(pyarrow.float64(), row_count, [
-            pyarrow.py_buffer(float_nullmask),
-            pyarrow.py_buffer(float_rows),
-        ])
-        bool_array = pyarrow.Array.from_buffers(pyarrow.bool_(), row_count, [
-            pyarrow.py_buffer(bool_nullmask),
-            pyarrow.py_buffer(bool_rows),
-        ])
-        return pyarrow.Table.from_arrays([int_array, float_array, bool_array], names=["int_col", "float_col", "bool_col"])
-    return message_to_table
+    gen_code = _generate_message_to_buffers(avro_schema) + """
+def message_to_table(message):
+    global message_to_buffers
 
+    row_count = message.avro_rows.row_count
+    block = message.avro_rows.serialized_binary_rows
+    int_col, float_col, bool_col = message_to_buffers(row_count, block)
+    int_nullmask, int_rows = int_col
+    float_nullmask, float_rows = float_col
+    bool_nullmask, bool_rows = bool_col
+
+    int_array = pyarrow.Array.from_buffers(pyarrow.int64(), row_count, [
+        pyarrow.py_buffer(int_nullmask),
+        pyarrow.py_buffer(int_rows),
+    ])
+    float_array = pyarrow.Array.from_buffers(pyarrow.float64(), row_count, [
+        pyarrow.py_buffer(float_nullmask),
+        pyarrow.py_buffer(float_rows),
+    ])
+    bool_array = pyarrow.Array.from_buffers(pyarrow.bool_(), row_count, [
+        pyarrow.py_buffer(bool_nullmask),
+        pyarrow.py_buffer(bool_rows),
+    ])
+    return pyarrow.Table.from_arrays([int_array, float_array, bool_array], names=["int_col", "float_col", "bool_col"])
+"""
+    exec(gen_code, gen_globals, gen_locals)
+
+    return gen_locals["message_to_table"]
+
+
+def _generate_populate_data_array(field_index, avro_field):
+    # TODO: Verify first is "null", since all fields should be nullable.
+    avro_type = avro_field["type"][1]
+    lines = []
+
+    if avro_type == "long":
+        lines.append(
+            "            position, field_{}_data[i] = _read_long(position, block)".format(field_index)
+        )
+    elif avro_type == "double":
+        lines.append(
+            "            position, field_{}_data[i] = _read_double(position, block)".format(field_index)
+        )
+    elif avro_type == "boolean":
+        lines.append(
+            "            position, boolmask = _read_boolean(position, block)"
+        )
+        lines.append(
+            "            field_{field_index}_data[nullbyte] = field_{field_index}_data[nullbyte] | (boolmask & nullbit)".format(field_index=field_index)
+        )
+    else:
+        raise NotImplementedError("Got unexpected type: {}.".format())
+    return "\n".join(lines)
+
+
+def _generate_data_array(field_index, avro_field):
+    # TODO: Verify first is "null", since all fields should be nullable.
+    avro_type = avro_field["type"][1]
+
+    if avro_type == "long":
+        constructor = "numpy.empty(row_count, dtype=numpy.int64)"
+    elif avro_type == "double":
+        constructor = "numpy.empty(row_count, dtype=numpy.float64)"
+    elif avro_type == "boolean":
+        constructor = "_make_bitarray(row_count)"
+    else:
+        raise NotImplementedError("Got unexpected type: {}.".format())
+    return "    field_{}_data = {}".format(field_index, constructor)
+
+
+def _generate_message_to_buffers(avro_schema):
+    gen_lines = ["""
+@numba.jit(nopython=True, nogil=True)
+def message_to_buffers(row_count, block):  #, avro_schema):
+    '''Parse all rows in a stream block.
+
+    Args:
+        block ( \
+            ~google.cloud.bigquery_storage_v1beta1.types.ReadRowsResponse \
+        ):
+            A block containing Avro bytes to parse into rows.
+        avro_schema (fastavro.schema):
+            A parsed Avro schema, used to deserialized the bytes in the
+            block.
+
+    Returns:
+        Iterable[Mapping]:
+            A sequence of rows, represented as dictionaries.
+    '''
+    position = 0
+    nullbit = numba.uint8(0)
+"""]
+
+    # Each column needs a nullmask and a data array.
+    for field_index, field in enumerate(avro_schema["fields"]):
+        gen_lines.append("    field_{}_nullmask = _make_bitarray(row_count)".format(field_index))
+        gen_lines.append(_generate_data_array(field_index, field))
+
+    gen_lines.append("""
+    for i in range(row_count):
+        nullbit = _rotate_nullbit(nullbit)
+        nullbyte = i // 8
+""")
+
+    for field_index, field in enumerate(avro_schema["fields"]):
+        gen_lines.append("""
+        position, union_type = _read_long(position, block)
+        if union_type != 0:
+            field_{field_index}_nullmask[nullbyte] = field_{field_index}_nullmask[nullbyte] | nullbit
+""".format(field_index=field_index))
+        gen_lines.append(_generate_populate_data_array(field_index, field))
+
+    gen_lines.append("""
+    return (
+""")
+
+    for field_index in range(len(avro_schema["fields"])):
+        gen_lines.append(
+            "        (field_{field_index}_nullmask, field_{field_index}_data),".format(field_index=field_index)
+        )
+    gen_lines.append("    )")
+    return "\n".join(gen_lines)
 
 
 def easy_scalars_to_arrow(message):
@@ -199,25 +302,24 @@ def _read_long(position, block):
 
 
 @numba.jit(nopython=True, nogil=True)
-def _make_nullmask(row_count):  #, avro_schema):
+def _make_bitarray(row_count):  #, avro_schema):
     extra_byte = 0
     if (row_count % 8) != 0:
         extra_byte = 1
     return numpy.zeros(row_count // 8 + extra_byte, dtype=numpy.uint8)
 
 
-@numba.jit(nopython=True)  #, nogil=True)
-def _rotate_nullmask(nullmask):
-    # TODO: Arrow assumes little endian. Detect big endian machines and rotate
-    # right, instead.
-    nullmask = (nullmask << 1) & 255
+@numba.jit(nopython=True, nogil=True)
+def _rotate_nullbit(nullbit):
+    # TODO: Arrow assumes little endian. Detect big endian machines and modify
+    #       rotation direction.
+    nullbit = (nullbit << 1) & 255
 
     # Have we looped?
-    if nullmask == 0:
-        # TODO: Detect big endian machines and start at 128, instead.
+    if nullbit == 0:
         return numba.uint8(1)
 
-    return nullmask
+    return nullbit
 
 
 #@numba.jit(nopython=True)
@@ -241,13 +343,13 @@ def _avro_df(row_count, block):  #, avro_schema):
     position = 0
     nullmask = numba.uint8(0)
 
-    int_nullmask = _make_nullmask(row_count)
-    float_nullmask = _make_nullmask(row_count)
-    bool_nullmask = _make_nullmask(row_count)
+    int_nullmask = _make_bitarray(row_count)
+    float_nullmask = _make_bitarray(row_count)
+    bool_nullmask = _make_bitarray(row_count)
 
     int_col = numpy.empty(row_count, dtype=numpy.int64)
     float_col = numpy.empty(row_count, dtype=numpy.float64)
-    bool_col = _make_nullmask(row_count)
+    bool_col = _make_bitarray(row_count)
 
     for i in range(row_count):
         nullmask = _rotate_nullmask(nullmask)
@@ -295,4 +397,3 @@ def _avro_df(row_count, block):  #, avro_schema):
         (float_nullmask, float_col),
         (bool_nullmask, bool_col),
     )
-
