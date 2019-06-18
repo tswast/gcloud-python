@@ -424,16 +424,10 @@ class _StreamParser(object):
         """
         self._parse_avro_schema()
 
-        if dtypes is None:
-            dtypes = {}
+        if dtypes is not None:
+            raise NotImplementedError("Cannot override dtypes with experimental pandas conversion library.")
 
-        columns = collections.defaultdict(list)
-        for row in self.to_rows(message):
-            for column in row:
-                columns[column].append(row[column])
-        for column in dtypes:
-            columns[column] = pandas.Series(columns[column], dtype=dtypes[column])
-        return pandas.DataFrame(columns, columns=self._column_names)
+        return self.to_arrow(message).to_pandas()
 
     def _parse_avro_schema(self):
         """Extract and parse Avro schema from a read session."""
