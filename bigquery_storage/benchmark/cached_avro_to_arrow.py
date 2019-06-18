@@ -24,7 +24,7 @@ import struct
 import sys
 
 from google.cloud import bigquery_storage_v1beta1
-from google.cloud.bigquery_storage_v1beta1 import _avro_to_arrow
+import avro_to_arrow.generator
 import google.cloud.bigquery_storage_v1beta1.types
 
 
@@ -33,7 +33,7 @@ table_id = "easy_scalars"
 with open("benchmark/messages/{}.schema".format(table_id), "r") as schema_file:
     avro_schema = json.load(schema_file)
 
-parser = _avro_to_arrow.generate_avro_to_arrow_parser(avro_schema)
+parser = avro_to_arrow.generator.generate_avro_to_arrow_parser(avro_schema)
 
 tables = []
 with open("benchmark/messages/{}.records".format(table_id), "rb") as downloads:

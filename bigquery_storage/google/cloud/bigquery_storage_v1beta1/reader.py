@@ -17,6 +17,7 @@ from __future__ import absolute_import
 import collections
 import json
 
+import avro_to_arrow.generator
 try:
     import fastavro
 except ImportError:  # pragma: NO COVER
@@ -29,7 +30,6 @@ except ImportError:  # pragma: NO COVER
     pandas = None
 import six
 
-from google.cloud.bigquery_storage_v1beta1 import _avro_to_arrow
 from google.cloud.bigquery_storage_v1beta1 import types
 
 
@@ -396,7 +396,7 @@ class _StreamParser(object):
         """[Alpha] TODOTODOTODO"""
         self._parse_avro_schema()
         if self._avro_to_arrow_func is None:
-            self._avro_to_arrow_func = _avro_to_arrow.generate_avro_to_arrow_parser(self._avro_schema_json)
+            self._avro_to_arrow_func = avro_to_arrow.generator.generate_avro_to_arrow_parser(self._avro_schema_json)
         return self._avro_to_arrow_func(message)
 
     def to_dataframe(self, message, dtypes=None):
